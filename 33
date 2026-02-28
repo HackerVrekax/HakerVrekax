@@ -1,5 +1,4 @@
 --[[
-
     Milenium Library
     -> Made by @finobe 
     -> Kind of got bored idk what to do with life
@@ -65,6 +64,11 @@
     local remove = table.remove
     local concat = table.concat
 -- 
+
+-- Проверка наличия файловых функций
+local function hasFileSystem()
+    return (isfile and writefile and readfile and listfiles and delfile and makefolder)
+end
 
 -- Library init
     getgenv().library = {
@@ -152,8 +156,15 @@
         
     library.__index = library
 
-    for _, path in next, library.folders do 
-        makefolder(library.directory .. path)
+    -- Создаем папки если есть файловая система
+    if hasFileSystem() then
+        for _, path in next, library.folders do 
+            pcall(function()
+                if not isfolder(library.directory .. path) then
+                    makefolder(library.directory .. path)
+                end
+            end)
+        end
     end
 
     local flags = library.flags 
@@ -162,29 +173,33 @@
 
     local fonts = {}; do
         function Register_Font(Name, Weight, Style, Asset)
-            if not isfile(Asset.Id) then
-                writefile(Asset.Id, Asset.Font)
-            end
+            if hasFileSystem() then
+                if not isfile(Asset.Id) then
+                    pcall(writefile, Asset.Id, Asset.Font)
+                end
 
-            if isfile(Name .. ".font") then
-                delfile(Name .. ".font")
-            end
+                if isfile(Name .. ".font") then
+                    pcall(delfile, Name .. ".font")
+                end
 
-            local Data = {
-                name = Name,
-                faces = {
-                    {
-                        name = "Normal",
-                        weight = Weight,
-                        style = Style,
-                        assetId = getcustomasset(Asset.Id),
+                local Data = {
+                    name = Name,
+                    faces = {
+                        {
+                            name = "Normal",
+                            weight = Weight,
+                            style = Style,
+                            assetId = getcustomasset(Asset.Id),
+                        },
                     },
-                },
-            }
+                }
 
-            writefile(Name .. ".font", http_service:JSONEncode(Data))
+                pcall(writefile, Name .. ".font", http_service:JSONEncode(Data))
 
-            return getcustomasset(Name .. ".font");
+                return getcustomasset(Name .. ".font");
+            else
+                return "rbxasset://fonts/families/SourceSansPro.json"
+            end
         end
         
         local Medium = Register_Font("Medium", 200, "Normal", {
@@ -375,9 +390,22 @@
             
             local list = {}
             
-            for idx, file in listfiles(library.directory .. "/configs") do
-                local name = file:gsub(library.directory .. "/configs\\", ""):gsub(".cfg", ""):gsub(library.directory .. "\\configs\\", "")
-                list[#list + 1] = name
+            if hasFileSystem() then
+                local success, files = pcall(listfiles, library.directory .. "/configs")
+                if success then
+                    for _, file in ipairs(files) do
+                        if file:match("%.json$") then
+                            local name = file:gsub(library.directory .. "/configs[/\\]", ""):gsub("%.json$", "")
+                            if name and name ~= "" then
+                                list[#list + 1] = name
+                            end
+                        end
+                    end
+                end
+            end
+            
+            if #list == 0 then
+                list = {"No configs found"}
             end
 
             config_holder.refresh_options(list)
@@ -386,37 +414,66 @@
         function library:get_config()
             local Config = {}
             
-            for _, v in next, flags do
-                if type(v) == "table" and v.key then
-                    Config[_] = {active = v.active, mode = v.mode, key = tostring(v.key)}
-                elseif type(v) == "table" and v["Transparency"] and v["Color"] then
-                    Config[_] = {Transparency = v["Transparency"], Color = v["Color"]:ToHex()}
+            for key, value in pairs(flags) do
+                if type(value) == "table" then
+                    if value.key then -- keybind
+                        Config[key] = {
+                            active = value.active, 
+                            mode = value.mode, 
+                            key = tostring(value.key)
+                        }
+                    elseif value.Color and value.Transparency ~= nil then -- colorpicker
+                        Config[key] = {
+                            Transparency = value.Transparency, 
+                            Color = value.Color:ToHex()
+                        }
+                    else -- другие таблицы
+                        Config[key] = value
+                    end
                 else
-                    Config[_] = v
+                    Config[key] = value
                 end
             end 
+            
+            -- Добавляем информацию о теме
+            Config["_theme"] = {
+                accent = themes.preset.accent:ToHex()
+            }
             
             return http_service:JSONEncode(Config)
         end
 
         function library:load_config(config_json) 
-            local config = http_service:JSONDecode(config_json)
+            local success, config = pcall(function()
+                return http_service:JSONDecode(config_json)
+            end)
             
-            for _, v in config do 
-                local function_set = library.config_flags[_]
+            if not success then return end
+            
+            -- Загружаем тему
+            if config["_theme"] and config["_theme"].accent then
+                local accentColor = hex(config["_theme"].accent)
+                library:update_theme("accent", accentColor)
+                config["_theme"] = nil
+            end
+            
+            for key, value in pairs(config) do 
+                local function_set = library.config_flags[key]
                 
-                if _ == "config_name_list" then 
+                if key == "config_name_list" then 
                     continue 
                 end
 
                 if function_set then 
-                    if type(v) == "table" and v["Transparency"] and v["Color"] then
-                        function_set(hex(v["Color"]), v["Transparency"])
-                    elseif type(v) == "table" and v["active"] then 
-                        function_set(v)
-                    else
-                        function_set(v)
-                    end
+                    pcall(function()
+                        if type(value) == "table" and value.Transparency and value.Color then
+                            function_set(hex(value.Color), value.Transparency)
+                        elseif type(value) == "table" and value.active ~= nil then 
+                            function_set(value)
+                        else
+                            function_set(value)
+                        end
+                    end)
                 end 
             end 
         end 
@@ -432,14 +489,15 @@
         end
 
         function library:update_theme(theme, color)
-            for _, property in themes.utility[theme] do 
-
-                for m, object in property do 
-                    if object[_] == themes.preset[theme] then 
-                        object[_] = color 
+            if themes.utility[theme] then
+                for property, objects in pairs(themes.utility[theme]) do 
+                    for _, object in ipairs(objects) do 
+                        if object[property] == themes.preset[theme] then 
+                            object[property] = color 
+                        end 
                     end 
                 end 
-            end 
+            end
 
             themes.preset[theme] = color 
         end 
@@ -456,7 +514,9 @@
             local open_element = library.current_open
 
             if open_element and new_path ~= open_element then
-                open_element.set_visible(false)
+                if open_element.set_visible then
+                    open_element.set_visible(false)
+                end
                 open_element.open = false;
             end 
 
@@ -468,7 +528,7 @@
         function library:create(instance, options)
             local ins = Instance.new(instance) 
             
-            for prop, value in options do 
+            for prop, value in pairs(options) do 
                 ins[prop] = value
             end
             
@@ -484,14 +544,190 @@
                 library[ "other" ]:Destroy()
             end 
             
-            for index, connection in library.connections do 
-                connection:Disconnect() 
-                connection = nil 
+            for _, connection in ipairs(library.connections) do 
+                if connection and connection.Connected then
+                    connection:Disconnect() 
+                end
             end
             
             library = nil 
         end 
     --
+    
+    -- Система сохранения конфигов
+    do
+        -- Получаем список конфигов
+        function library:getConfigList()
+            if not hasFileSystem() then return {} end
+            
+            local configs = {}
+            local success, files = pcall(listfiles, library.directory .. "/configs")
+            
+            if success then
+                for _, file in ipairs(files) do
+                    if file:match("%.json$") then
+                        local name = file:match("([^/\\]+)%.json$")
+                        if name then
+                            table.insert(configs, name)
+                        end
+                    end
+                end
+            end
+            
+            table.sort(configs)
+            return configs
+        end
+        
+        -- Сохраняем конфиг
+        function library:saveConfig(name)
+            if not name or name == "" then
+                notifications:create_notification({
+                    name = "Error",
+                    info = "Please enter a config name",
+                    lifetime = 3
+                })
+                return false
+            end
+            
+            if not hasFileSystem() then
+                notifications:create_notification({
+                    name = "Error",
+                    info = "File system not available",
+                    lifetime = 3
+                })
+                return false
+            end
+            
+            local filePath = string.format("%s/configs/%s.json", library.directory, name)
+            
+            local success, err = pcall(function()
+                writefile(filePath, library:get_config())
+            end)
+            
+            if success then
+                notifications:create_notification({
+                    name = "Success",
+                    info = string.format("Saved config: %s", name),
+                    lifetime = 3
+                })
+                
+                library:update_config_list()
+                return true
+            else
+                notifications:create_notification({
+                    name = "Error",
+                    info = string.format("Failed to save: %s", tostring(err)),
+                    lifetime = 3
+                })
+                return false
+            end
+        end
+        
+        -- Загружаем конфиг
+        function library:loadConfig(name)
+            if not name or name == "" then
+                notifications:create_notification({
+                    name = "Error",
+                    info = "Please select a config",
+                    lifetime = 3
+                })
+                return false
+            end
+            
+            if not hasFileSystem() then
+                notifications:create_notification({
+                    name = "Error",
+                    info = "File system not available",
+                    lifetime = 3
+                })
+                return false
+            end
+            
+            local filePath = string.format("%s/configs/%s.json", library.directory, name)
+            
+            if not isfile(filePath) then
+                notifications:create_notification({
+                    name = "Error",
+                    info = string.format("Config not found: %s", name),
+                    lifetime = 3
+                })
+                return false
+            end
+            
+            local success, content = pcall(readfile, filePath)
+            
+            if not success then
+                notifications:create_notification({
+                    name = "Error",
+                    info = "Failed to read config file",
+                    lifetime = 3
+                })
+                return false
+            end
+            
+            library:load_config(content)
+            
+            notifications:create_notification({
+                name = "Success",
+                info = string.format("Loaded config: %s", name),
+                lifetime = 3
+            })
+            
+            return true
+        end
+        
+        -- Удаляем конфиг
+        function library:deleteConfig(name)
+            if not name or name == "" then
+                notifications:create_notification({
+                    name = "Error",
+                    info = "Please select a config",
+                    lifetime = 3
+                })
+                return false
+            end
+            
+            if not hasFileSystem() then
+                notifications:create_notification({
+                    name = "Error",
+                    info = "File system not available",
+                    lifetime = 3
+                })
+                return false
+            end
+            
+            local filePath = string.format("%s/configs/%s.json", library.directory, name)
+            
+            if not isfile(filePath) then
+                notifications:create_notification({
+                    name = "Error",
+                    info = "Config not found",
+                    lifetime = 3
+                })
+                return false
+            end
+            
+            local success, err = pcall(delfile, filePath)
+            
+            if success then
+                notifications:create_notification({
+                    name = "Success",
+                    info = string.format("Deleted config: %s", name),
+                    lifetime = 3
+                })
+                
+                library:update_config_list()
+                return true
+            else
+                notifications:create_notification({
+                    name = "Error",
+                    info = "Failed to delete config",
+                    lifetime = 3
+                })
+                return false
+            end
+        end
+    end
     
     -- Library element functions
         function library:window(properties)
@@ -521,6 +757,8 @@
                 ZIndexBehavior = Enum.ZIndexBehavior.Sibling;
                 IgnoreGuiInset = true;
             }); 
+
+            library.cache = library[ "items" ]
 
             local items = cfg.items; do
                 items[ "main" ] = library:create( "Frame" , {
@@ -593,7 +831,6 @@
                 items[ "title" ] = library:create( "TextLabel" , {
                     FontFace = fonts.font;
                     BorderColor3 = rgb(0, 0, 0);
-                    Text = name;
                     Parent = items[ "side_frame" ];
                     Name = "\0";
                     Text = string.format('<u>%s</u><font color = "rgb(255, 255, 255)">%s</font>', cfg.name, cfg.suffix);
@@ -731,15 +968,6 @@
             end 
 
             function cfg.toggle_menu(bool) 
-                -- WIP 
-                -- if cfg.tween then 
-                --     cfg.tween:Cancel()
-                -- end 
-
-                -- items[ "main" ].Size = dim2(items[ "main" ].Size.Scale.X, items[ "main" ].Size.Offset.X - 20, items[ "main" ].Size.Scale.Y, items[ "main" ].Size.Offset.Y - 20)
-                -- library:tween(items[ "tab_holder" ], {Size = dim2(1, -196, 1, -81)}, Enum.EasingStyle.Quad, 0.4)
-                -- cfg.tween = 
-                
                 library[ "items" ].Enabled = bool
             end 
                 
@@ -865,7 +1093,7 @@
                         PaddingLeft = dim(0, 7)
                     });                        
 
-                    for _, section in cfg.tabs do
+                    for _, section in ipairs(cfg.tabs) do
                         local data = {items = {}} 
 
                         local multi_items = data.items; do 
@@ -974,13 +1202,9 @@
                         data.button = multi_items[ "button" ]
                         data.page = multi_items[ "tab" ]
                         data.parent = setmetatable(data, library):sub_tab({}).items[ "tab_parent" ]
-                        
-                        -- Old column code
-                        -- data.left = multi_items[ "left" ]
-                        -- data.right = multi_items[ "right" ]
 
-						function data.open_page()
-							local page = cfg.current_multi; 
+                        function data.open_page()
+                            local page = cfg.current_multi; 
                             
                             if page and page.text ~= data.text then 
                                 self.items[ "global_fade" ].BackgroundTransparency = 0
@@ -996,7 +1220,7 @@
                                 library:tween(page.button, {BackgroundTransparency = 1})
 
                                 page.page.Visible = false
-                                page.page.Parent = library[ "cache" ] 
+                                page.page.Parent = library.cache
                             end 
                             
                             library:tween(data.text, {TextColor3 = rgb(255, 255, 255)})
@@ -1010,16 +1234,18 @@
                             cfg.current_multi = data
 
                             library:close_element()
-						end
+                        end
 
-						multi_items[ "button" ].MouseButton1Down:Connect(function()
-							data.open_page() 
-						end)
+                        multi_items[ "button" ].MouseButton1Down:Connect(function()
+                            data.open_page() 
+                        end)
 
-						cfg.pages[#cfg.pages + 1] = setmetatable(data, library)
+                        cfg.pages[#cfg.pages + 1] = setmetatable(data, library)
                     end 
 
-                    cfg.pages[1].open_page()
+                    if #cfg.pages > 0 then
+                        cfg.pages[1].open_page()
+                    end
                 --
             end 
 
@@ -1039,9 +1265,9 @@
                     library:tween(selected_tab[ 3 ], {TextColor3 = rgb(72, 72, 73)})
 
                     selected_tab[ 4 ].Visible = false
-                    selected_tab[ 4 ].Parent = library[ "cache" ]
+                    selected_tab[ 4 ].Parent = library.cache
                     selected_tab[ 5 ].Visible = false
-                    selected_tab[ 5 ].Parent = library[ "cache" ]
+                    selected_tab[ 5 ].Parent = library.cache
                 end
 
                 library:tween(items[ "button" ], {BackgroundTransparency = 0})
@@ -1070,7 +1296,7 @@
             end)
             
             if not self.selected_tab then 
-                cfg.open_tab(true) 
+                cfg.open_tab() 
             end
 
             return unpack(cfg.pages)
@@ -1658,7 +1884,7 @@
                 cfg.set(cfg.enabled)
             end)
             
-            if cfg.seperator then -- ok bro my lua either sucks or this was a pain in the ass to make (simple if statement aswell 💔)
+            if cfg.seperator then
                 library:create( "Frame" , {
                     AnchorPoint = vec2(0, 1);
                     Parent = self.items[ "elements" ];
@@ -1925,7 +2151,7 @@
                 seperator = options.seperator or options.Seperator or true;
             }   
 
-            cfg.default = options.default or (cfg.multi and {cfg.items[1]}) or cfg.items[1] or "None"
+            cfg.default = options.default or (cfg.multi and {cfg.options[1]}) or cfg.options[1] or "None"
             flags[cfg.flag] = cfg.default
 
             local items = cfg.items; do 
@@ -1949,7 +2175,7 @@
                         FontFace = fonts.small;
                         TextColor3 = rgb(245, 245, 245);
                         BorderColor3 = rgb(0, 0, 0);
-                        Text = "Dropdown";
+                        Text = cfg.name or "Dropdown";
                         Parent = items[ "dropdown_object" ];
                         Name = "\0";
                         Size = dim2(1, 0, 0, 0);
@@ -2030,7 +2256,7 @@
                         FontFace = fonts.small;
                         TextColor3 = rgb(86, 86, 87);
                         BorderColor3 = rgb(0, 0, 0);
-                        Text = "awdawdawdawdawdawdawdaw";
+                        Text = "None";
                         Parent = items[ "dropdown" ];
                         Name = "\0";
                         Size = dim2(1, -12, 0, 0);
@@ -2150,7 +2376,7 @@
                 local selected = {}
                 local isTable = type(value) == "table"
 
-                for _, option in cfg.option_instances do 
+                for _, option in ipairs(cfg.option_instances) do 
                     if option.Text == value or (isTable and find(value, option.Text)) then 
                         insert(selected, option.Text)
                         cfg.multi_items = selected
@@ -2160,7 +2386,7 @@
                     end
                 end
 
-                items[ "sub_text" ].Text = isTable and concat(selected, ", ") or selected[1] or ""
+                items[ "sub_text" ].Text = isTable and concat(selected, ", ") or selected[1] or "None"
                 flags[cfg.flag] = isTable and selected or selected[1]
                 
                 cfg.callback(flags[cfg.flag]) 
@@ -2169,15 +2395,15 @@
             function cfg.refresh_options(list) 
                 cfg.y_size = 0
 
-                for _, option in cfg.option_instances do 
+                for _, option in ipairs(cfg.option_instances) do 
                     option:Destroy() 
                 end
                 
                 cfg.option_instances = {} 
 
-                for _, option in list do 
+                for _, option in ipairs(list) do 
                     local button = cfg.render_option(option)
-                    cfg.y_size += button.AbsoluteSize.Y + 6 -- super annoying manual sizing but oh well
+                    cfg.y_size = cfg.y_size + button.AbsoluteSize.Y + 6
                     insert(cfg.option_instances, button)
                     
                     button.MouseButton1Down:Connect(function()
@@ -2219,7 +2445,6 @@
                 });
             end 
 
-            flags[cfg.flag] = {} 
             config_flags[cfg.flag] = cfg.set
             
             cfg.refresh_options(cfg.options)
@@ -2675,7 +2900,7 @@
                         CornerRadius = dim(0, 3)
                     });
                     
-                    items[ "UICorenr" ] = library:create( "UICorner" , { -- fire misstypo (im not fixing this RAWR)
+                    items[ "UICorenr" ] = library:create( "UICorner" , {
                         Parent = items[ "colorpicker_holder" ];
                         Name = "\0";
                         CornerRadius = dim(0, 4)
@@ -2689,7 +2914,7 @@
                 items[ "colorpicker_holder" ].Position = dim_offset(items[ "colorpicker" ].AbsolutePosition.X, items[ "colorpicker" ].AbsolutePosition.Y + items[ "colorpicker" ].AbsoluteSize.Y + 45)
 
                 library:tween(items[ "colorpicker_fade" ], {BackgroundTransparency = 1}, Enum.EasingStyle.Quad, 0.4)
-                library:tween(items[ "colorpicker_holder" ], {Position = items[ "colorpicker_holder" ].Position + dim_offset(0, 20)}) -- p100 check
+                library:tween(items[ "colorpicker_holder" ], {Position = items[ "colorpicker_holder" ].Position + dim_offset(0, 20)})
                 
                 if not (self.sanity and library.current_open == self and self.open) then 
                     library:close_element(cfg)
@@ -2711,13 +2936,14 @@
                 
                 local Color = hsv(h, s, v)
 
-                -- Ok so quick story, should I cache any of this? no...?? anyways I know this code is very bad but its your fault for buying a ui with animations (on a serious note im too lazy to make this look nice)
-                -- Also further note, yeah I kind of did this scale_factor * size-valuesize.plane because then I would have to do tomfoolery to make it clip properly.
                 library:tween(items[ "hue_picker" ], {Position = dim2(0, (items[ "hue_gradient" ].AbsoluteSize.X - items[ "hue_picker" ].AbsoluteSize.X) * h, 0.5, 0)}, Enum.EasingStyle.Linear, 0.05)
                 library:tween(items[ "alpha_picker" ], {Position = dim2(0, (items[ "alpha_gradient" ].AbsoluteSize.X - items[ "alpha_picker" ].AbsoluteSize.X) * (1 - a), 0.5, 0)}, Enum.EasingStyle.Linear, 0.05)
                 library:tween(items[ "satvalpicker" ], {Position = dim2(0, s * (items[ "saturation_holder" ].AbsoluteSize.X - items[ "satvalpicker" ].AbsoluteSize.X), 1, 1 - v * (items[ "saturation_holder" ].AbsoluteSize.Y - items[ "satvalpicker" ].AbsoluteSize.Y))}, Enum.EasingStyle.Linear, 0.05)
 
-                items[ "alpha_indicator" ]:FindFirstChildOfClass("UIGradient").Color = rgbseq{rgbkey(0, rgb(112, 112, 112)), rgbkey(1, hsv(h, 1, 1))}; -- shit code
+                local gradient = items[ "alpha_indicator" ]:FindFirstChildOfClass("UIGradient")
+                if gradient then
+                    gradient.Color = rgbseq{rgbkey(0, rgb(112, 112, 112)), rgbkey(1, hsv(h, 1, 1))}
+                end
                 
                 items[ "colorpicker" ].BackgroundColor3 = Color
                 items[ "colorpicker_inline" ].BackgroundColor3 = Color
@@ -2732,16 +2958,16 @@
                     Transparency = a 
                 }
                 
-                local color = items[ "colorpicker" ].BackgroundColor3
-                items[ "input" ].Text = string.format("%s, %s, %s, ", library:round(color.R * 255), library:round(color.G * 255), library:round(color.B * 255))
-                items[ "input" ].Text ..= library:round(1 - a, 0.01)
+                local colorVal = items[ "colorpicker" ].BackgroundColor3
+                items[ "input" ].Text = string.format("%s, %s, %s, ", library:round(colorVal.R * 255), library:round(colorVal.G * 255), library:round(colorVal.B * 255))
+                items[ "input" ].Text = items[ "input" ].Text .. library:round(1 - a, 0.01)
                 
                 cfg.callback(Color, a)
             end
             
             function cfg.update_color() 
-                local mouse = uis:GetMouseLocation() 
-                local offset = vec2(mouse.X, mouse.Y - gui_offset) 
+                local mousePos = uis:GetMouseLocation() 
+                local offset = vec2(mousePos.X, mousePos.Y - gui_offset) 
 
                 if dragging_sat then	
                     s = math.clamp((offset - items["sat"].AbsolutePosition).X / items["sat"].AbsoluteSize.X, 0, 1)
@@ -2757,7 +2983,6 @@
 
             items[ "colorpicker" ].MouseButton1Click:Connect(function()
                 cfg.open = not cfg.open 
-
                 cfg.set_visible(cfg.open)            
             end)
 
@@ -3047,7 +3272,7 @@
                         FontFace = fonts.font;
                         TextColor3 = rgb(86, 86, 87);
                         BorderColor3 = rgb(0, 0, 0);
-                        Text = "LSHIFT";
+                        Text = "NONE";
                         Parent = items[ "keybind_holder" ];
                         Name = "\0";
                         Size = dim2(1, -12, 0, 0);
@@ -3111,7 +3336,7 @@
                     local options = {"Hold", "Toggle", "Always"}
                     
                     cfg.y_size = 20
-                    for _, option in options do                        
+                    for _, option in ipairs(options) do                        
                         local name = library:create( "TextButton" , {
                             FontFace = fonts.font;
                             TextColor3 = rgb(72, 72, 73);
@@ -3129,7 +3354,7 @@
                         }); cfg.hold_instances[option] = name
                         library:apply_theme(name, "accent", "TextColor3")
                         
-                        cfg.y_size += name.AbsoluteSize.Y
+                        cfg.y_size = cfg.y_size + name.AbsoluteSize.Y
 
                         library:create( "UIPadding" , {
                             Parent = name;
@@ -3149,21 +3374,23 @@
                 -- 
             end 
             
-            function cfg.modify_mode_color(path) -- ts so frikin tuff 💀
-                for _, v in cfg.hold_instances do 
+            function cfg.modify_mode_color(path)
+                for _, v in pairs(cfg.hold_instances) do 
                     v.TextColor3 = rgb(72, 72, 72)
                 end 
 
-                cfg.hold_instances[path].TextColor3 = themes.preset.accent
+                if cfg.hold_instances[path] then
+                    cfg.hold_instances[path].TextColor3 = themes.preset.accent
+                end
             end
 
             function cfg.set_mode(mode) 
                 cfg.mode = mode 
 
                 if mode == "Always" then
-                    cfg.set(true)
+                    cfg.active = true
                 elseif mode == "Hold" then
-                    cfg.set(false)
+                    cfg.active = false
                 end
 
                 flags[cfg.flag]["mode"] = mode
@@ -3189,13 +3416,15 @@
                     cfg.mode = input
                     cfg.set_mode(cfg.mode) 
                 elseif type(input) == "table" then 
-                    input.key = type(input.key) == "string" and input.key ~= "NONE" and library:convert_enum(input.key) or input.key
-                    input.key = input.key == Enum.KeyCode.Escape and "NONE" or input.key
+                    if input.key and type(input.key) == "string" and input.key ~= "NONE" then
+                        input.key = library:convert_enum(input.key)
+                    end
+                    input.key = (input.key == Enum.KeyCode.Escape) and "NONE" or input.key
 
                     cfg.key = input.key or "NONE"
                     cfg.mode = input.mode or "Toggle"
 
-                    if input.active then
+                    if input.active ~= nil then
                         cfg.active = input.active
                     end
 
@@ -3205,7 +3434,7 @@
                 cfg.callback(cfg.active)
 
                 local text = tostring(cfg.key) ~= "Enums" and (keys[cfg.key] or tostring(cfg.key):gsub("Enum.", "")) or nil
-                local __text = text and (tostring(text):gsub("KeyCode.", ""):gsub("UserInputType.", ""))
+                local __text = text and (tostring(text):gsub("KeyCode.", ""):gsub("UserInputType.", "")) or "NONE"
                 
                 items[ "key" ].Text = __text
 
@@ -3228,10 +3457,13 @@
                 items[ "key" ].Text = "..."	
 
                 cfg.binding = library:connection(uis.InputBegan, function(keycode, game_event)  
+                    if game_event then return end
                     cfg.set(keycode.KeyCode ~= Enum.KeyCode.Unknown and keycode.KeyCode or keycode.UserInputType)
                     
-                    cfg.binding:Disconnect() 
-                    cfg.binding = nil
+                    if cfg.binding then
+                        cfg.binding:Disconnect() 
+                        cfg.binding = nil
+                    end
                 end)
             end)
 
@@ -3250,7 +3482,8 @@
                             cfg.active = not cfg.active
                             cfg.set(cfg.active)
                         elseif cfg.mode == "Hold" then 
-                            cfg.set(true)
+                            cfg.active = true
+                            cfg.set(cfg.active)
                         end
                     end
                 end
@@ -3265,7 +3498,8 @@
     
                 if selected_key == cfg.key then
                     if cfg.mode == "Hold" then 
-                        cfg.set(false)
+                        cfg.active = false
+                        cfg.set(cfg.active)
                     end
                 end
             end)
@@ -3346,7 +3580,7 @@
             local cfg = {
                 open = false; 
                 items = {}; 
-                sanity = true; -- made this for my own sanity.
+                sanity = true;
             }
 
             local items = cfg.items; do 
@@ -3402,11 +3636,6 @@
                 
                 library:create( "UICorner" , {
                     Parent = items[ "outline" ];
-                    CornerRadius = dim(0, 7)
-                });
-                
-                library:create( "UICorner" , {
-                    Parent = items[ "fade" ];
                     CornerRadius = dim(0, 7)
                 });
                 
@@ -3472,12 +3701,13 @@
                 });
             end 
 
-            function cfg.refresh_options(options_to_refresh) -- ignore goofy parameter
-                for _,option in cfg.data_store do 
-                    option:Destroy()
+            function cfg.refresh_options(options_to_refresh)
+                for _,option in ipairs(cfg.data_store) do 
+                    pcall(option.Destroy, option)
                 end
+                cfg.data_store = {}
 
-                for _, option_data in options_to_refresh do -- haha u skids no next >_<
+                for _, option_data in ipairs(options_to_refresh) do
                     local button = library:create( "TextButton" , {
                         FontFace = fonts.small;
                         TextColor3 = rgb(0, 0, 0);
@@ -3492,7 +3722,8 @@
                         BorderSizePixel = 0;
                         TextSize = 14;
                         BackgroundColor3 = rgb(33, 33, 35)
-                    }); cfg.data_store[#cfg.data_store + 1] = button;
+                    }); 
+                    table.insert(cfg.data_store, button)
 
                     local name = library:create( "TextLabel" , {
                         FontFace = fonts.font;
@@ -3549,243 +3780,80 @@
             return setmetatable(cfg, library)
         end 
 
-  -- Добавьте эти функции в библиотеку после инициализации
-
-function Library:InitConfigSystem()
-    -- Создаем папку для конфигов если её нет
-    local function EnsureConfigFolder()
-        if not isfolder then return false end
-        
-        local success, err = pcall(function()
-            if not isfolder("Obsidian/configs") then
-                makefolder("Obsidian/configs")
-            end
-        end)
-        
-        return success
-    end
-    
-    -- Получаем список всех конфигов
-    function Library:GetConfigList()
-        if not isfolder then return {} end
-        
-        local configs = {}
-        local success, files = pcall(listfiles, "Obsidian/configs")
-        
-        if success then
-            for _, file in ipairs(files) do
-                if file:match("%.json$") then
-                    local name = file:match("([^/\\]+)%.json$")
-                    if name then
-                        table.insert(configs, name)
-                    end
+        function library:init_config(window) 
+            window:seperator({name = "Settings"})
+            local main = window:tab({name = "Configs", tabs = {"Main"}})
+            
+            local column = main:column({})
+            local section = column:section({name = "Configs", size = 1, default = true, icon = "rbxassetid://139628202576511"})
+            config_holder = section:list({options = library:getConfigList(), callback = function(option) end, flag = "config_name_list"}); 
+            
+            local column = main:column({})
+            local section2 = column:section({name = "Settings", side = "right", size = 1, default = true, icon = "rbxassetid://129380150574313"})
+            section2:textbox({name = "Config name:", flag = "config_name_text"})
+            
+            section2:button({name = "Save", callback = function() 
+                local config_name = flags["config_name_text"] or flags["config_name_list"]
+                if config_name and config_name ~= "No configs found" then
+                    library:saveConfig(config_name)
+                    library:update_config_list()
+                else
+                    notifications:create_notification({
+                        name = "Error",
+                        info = "Please enter a config name",
+                        lifetime = 3
+                    })
                 end
-            end
-        end
-        
-        table.sort(configs)
-        return configs
-    end
-    
-    -- Сохраняем текущие настройки в конфиг
-    function Library:SaveConfig(name)
-        if not name or name == "" then
-            Library:Notify({
-                Title = "Error",
-                Description = "Please enter a config name",
-                Time = 3
-            })
-            return false
-        end
-        
-        if not EnsureConfigFolder() then
-            Library:Notify({
-                Title = "Error",
-                Description = "File system not available",
-                Time = 3
-            })
-            return false
-        end
-        
-        local config = {}
-        
-        -- Собираем все настройки
-        for key, option in pairs(Options) do
-            if option and option.Save ~= false then
-                config[key] = {
-                    Type = option.Type,
-                    Value = option.Value,
-                    Default = option.Default,
-                    -- Для специфичных типов
-                    Mode = option.Mode,
-                    Modifiers = option.Modifiers,
-                    Transparency = option.Transparency,
-                    Color = option.Color,
-                }
-            end
-        end
-        
-        -- Сохраняем тогглы
-        for key, toggle in pairs(Toggles) do
-            if toggle and toggle.Save ~= false then
-                config["Toggle_" .. key] = {
-                    Type = "Toggle",
-                    Value = toggle.Value,
-                    Default = toggle.Default
-                }
-            end
-        end
-        
-        -- Сохраняем в файл
-        local success, err = pcall(function()
-            local json = game:GetService("HttpService"):JSONEncode(config)
-            writefile(string.format("Obsidian/configs/%s.json", name), json)
-        end)
-        
-        if success then
-            Library:Notify({
-                Title = "Success",
-                Description = string.format("Saved config: %s", name),
-                Time = 3
-            })
-            return true
-        else
-            Library:Notify({
-                Title = "Error",
-                Description = "Failed to save config: " .. tostring(err),
-                Time = 3
-            })
-            return false
-        end
-    end
-    
-    -- Загружаем настройки из конфига
-    function Library:LoadConfig(name)
-        if not name or name == "" then
-            Library:Notify({
-                Title = "Error",
-                Description = "Please select a config",
-                Time = 3
-            })
-            return false
-        end
-        
-        local filepath = string.format("Obsidian/configs/%s.json", name)
-        
-        if not isfile or not isfile(filepath) then
-            Library:Notify({
-                Title = "Error",
-                Description = "Config not found: " .. name,
-                Time = 3
-            })
-            return false
-        end
-        
-        local success, data = pcall(function()
-            local content = readfile(filepath)
-            return game:GetService("HttpService"):JSONDecode(content)
-        end)
-        
-        if not success then
-            Library:Notify({
-                Title = "Error",
-                Description = "Failed to load config (corrupted?)",
-                Time = 3
-            })
-            return false
-        end
-        
-        -- Применяем настройки
-        for key, value in pairs(data) do
-            if key:match("^Toggle_") then
-                local toggleKey = key:gsub("^Toggle_", "")
-                local toggle = Toggles[toggleKey]
-                if toggle and toggle.SetValue then
-                    toggle:SetValue(value.Value)
+            end}) 
+            
+            section2:button({name = "Load", callback = function() 
+                local config_name = flags["config_name_list"]
+                if config_name and config_name ~= "No configs found" then
+                    library:loadConfig(config_name)
+                else
+                    notifications:create_notification({
+                        name = "Error",
+                        info = "Please select a config",
+                        lifetime = 3
+                    })
                 end
-            else
-                local option = Options[key]
-                if option then
-                    if option.SetValue then
-                        if option.Type == "ColorPicker" then
-                            option:SetValueRGB(value.Color or Color3.new(1,1,1), value.Transparency or 0)
-                        elseif option.Type == "KeyPicker" then
-                            option:SetValue({value.Value, value.Mode, value.Modifiers})
-                        elseif option.Type == "Dropdown" then
-                            option:SetValue(value.Value)
-                        elseif option.Type == "Slider" then
-                            option:SetValue(value.Value)
-                        elseif option.Type == "Input" then
-                            option:SetValue(value.Value)
-                        end
-                    end
+            end})
+            
+            section2:button({name = "Delete", callback = function() 
+                local config_name = flags["config_name_list"]
+                if config_name and config_name ~= "No configs found" then
+                    library:deleteConfig(config_name)
+                else
+                    notifications:create_notification({
+                        name = "Error",
+                        info = "Please select a config",
+                        lifetime = 3
+                    })
                 end
-            end
+            end})
+            
+            section2:button({name = "Refresh", callback = function()
+                library:update_config_list()
+            end})
+            
+            section2:colorpicker({name = "Menu Accent", callback = function(color, alpha) 
+                library:update_theme("accent", color) 
+            end, color = themes.preset.accent})
+            
+            section2:keybind({name = "Menu Bind", callback = function(bool) 
+                window.toggle_menu(bool) 
+            end, default = true})
         end
-        
-        Library:Notify({
-            Title = "Success",
-            Description = string.format("Loaded config: %s", name),
-            Time = 3
-        })
-        
-        return true
-    end
-    
-    -- Удаляем конфиг
-    function Library:DeleteConfig(name)
-        if not name or name == "" then
-            Library:Notify({
-                Title = "Error",
-                Description = "Please select a config",
-                Time = 3
-            })
-            return false
-        end
-        
-        local filepath = string.format("Obsidian/configs/%s.json", name)
-        
-        if not isfile or not isfile(filepath) then
-            Library:Notify({
-                Title = "Error",
-                Description = "Config not found",
-                Time = 3
-            })
-            return false
-        end
-        
-        local success, err = pcall(delfile, filepath)
-        
-        if success then
-            Library:Notify({
-                Title = "Success",
-                Description = string.format("Deleted config: %s", name),
-                Time = 3
-            })
-            return true
-        else
-            Library:Notify({
-                Title = "Error",
-                Description = "Failed to delete config",
-                Time = 3
-            })
-            return false
-        end
-    end
-end
-
--- Инициализируем систему конфигов
-Library:InitConfigSystem()
     --
 
     -- Notification Library
         function notifications:refresh_notifs() 
             local offset = 50
 
-            for i, v in notifications.notifs do
+            for i, v in ipairs(notifications.notifs) do
                 local Position = vec2(20, offset)
                 library:tween(v, {Position = dim_offset(Position.X, Position.Y)}, Enum.EasingStyle.Quad, 0.4)
-                offset += (v.AbsoluteSize.Y + 10)
+                offset = offset + (v.AbsoluteSize.Y + 10)
             end
 
             return offset
@@ -3796,7 +3864,7 @@ Library:InitConfigSystem()
             
             library:tween(path, {BackgroundTransparency = fading}, Enum.EasingStyle.Quad, 1)
 
-            for _, instance in path:GetDescendants() do 
+            for _, instance in ipairs(path:GetDescendants()) do 
                 if not instance:IsA("GuiObject") then 
                     if instance:IsA("UIStroke") then
                         library:tween(instance, {Transparency = fading}, Enum.EasingStyle.Quad, 1)
